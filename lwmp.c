@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "lwp.h"
+#include "rr.h"
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/types.h>
@@ -9,6 +10,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#define LWP_RUNNING   0
+#define LWP_TERMINATED 1
+
+int count = 0;
 /* Create a new lightweight process */
 tid_t lwp_create(lwpfun function, void *argument) {
 	size_t stack_size = 8 * 1024 * 1024;
@@ -23,18 +28,53 @@ tid_t lwp_create(lwpfun function, void *argument) {
 
 	context *thread_context = malloc(sizeof(context));
 
-	if (context == NULL){
+	if (thread_context == NULL){
 		printf("Malloc failed");
 		return 1;
 	}
+	count++;
+	thread_context->stack = stack;
+       	thread_context->tid = count;
+	thread_context->stacksize = stack_size;
+	thread_context->state.fxsave = FPU_INIT;
+	thread_context->status = LWP_RUNNING;
+	thread_context->lib_one = NULL;
+	thread_context->lib_two = NULL;
+	thread_context->sched_one = NULL;
+	thread_context->sched_two = NULL;
+	thread_context->exited = NULL;
+	
+	RoundRobin->admit(thread_context);
+	return  thread_context->tid;	
 
-	thread_context->stack = stack
-       	thread_context->	
 }
 
 /* Start the LWP system */
 void lwp_start(void) {
-    // TODO
+    context *OG_context = malloc(sizeof(context));
+
+        if (OG_context == NULL){
+                printf("Malloc failed");
+                return 1;
+        }
+
+	void *stack;
+
+__asm__ volatile ("mov %%rsp, %0" : "=r"(stack));
+
+        count++;
+        OG_context->stack = stack;
+        OG_context->tid = count;
+        OG_context->stacksize = stack_size;
+        OG_context->state.fxsave = FPU_INIT;
+        OG_context->status = LWP_RUNNING;
+        OG_context->lib_one = NULL;
+        OG_context->lib_two = NULL;
+        OG_context->sched_one = NULL;
+        OG_context->sched_two = NULL;
+        OG_context->exited = NULL;:
+
+        RoundRobin->admit(OG_context);
 }
 
 /* Yield control to another LWP */
