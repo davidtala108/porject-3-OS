@@ -16,6 +16,13 @@ static tid_t next_tid = 1; // the id of the next available thread
 static scheduler current_scheduler = NULL; // pointer to the structure with the scheduler fucntions (rr by default)
 static int scheduler_initialized = 0; // flag that determines if we initialized the scheduler
 
+// two seperate qeuees for the teminated and waiting threads
+static thread terminated_head = NULL;
+static thread terminated_tail = NULL;
+static thread waiting_head = NULL;
+static thread waiting_tail = NULL;
+
+
 /* Wrapper for thread functions */
 static void lwp_wrap(lwpfun fun, void *arg) {
 
@@ -41,6 +48,42 @@ static scheduler get_scheduler(void) {
     }
 
     return current_scheduler;
+}
+
+// helper function that we will need in the exit function that lets us put a thread in either of the two queues that are defined above
+static void enqueue(thread *head, thread *tail, thread threa) {
+
+    // adding the new thread "threa" to the end of the queue
+    // since it's the last thread, its lib_two pointer should be NULL
+    threa->lib_two = NULL; // lib_two is provided in lwp.h and is basically thread.next (or at least that's how I'm using it)
+
+    if (*tail == NULL) {
+        *head = threa;
+    } else {
+        (*tail)->lib_two = threa;
+    }
+
+    *tail = threa;
+}
+
+// helper function that is practically the opposite as the above function
+static thread dequeue(thread *head, thread *tail) {
+
+    if (*head == NULL) {
+        return NULL;
+    }
+
+    thread removed = *head;
+
+    *head = removed->lib_two;
+
+    if (*head == NULL) {
+        *tail = NULL;
+    }
+
+    removed->lib_two = NULL;
+
+    return removed;
 }
 
 /* Create a new lightweight process */
@@ -223,6 +266,23 @@ void lwp_exit(int status) {
 	// rmeoval of thread
     get_scheduler()->remove(old_lwp);
 
+    // check if any threads are waiting
+    if (waiting_head != NULL) {
+
+        // get the oldest waiting thread
+        thread waiting = dequeue(&waiting_head, &waiting_tail);
+
+        // associate the terminated thread with the waiting thread
+        waiting->exited = old_lwp;
+
+        // put the waiting thread back into the scheduler
+        get_scheduler()->admit(waiting);
+
+    } else {
+        // in this case, no threads are waiting, so save the terminated thread
+        enqueue(&terminated_head, &terminated_tail, old_lwp);
+    }
+
 	// requests from the scheduler which thread should go next
     thread next_lwp = get_scheduler()->next();
 
@@ -241,14 +301,87 @@ void lwp_exit(int status) {
 
 /* Wait for a terminated LWP */
 tid_t lwp_wait(int *status) {
-    // TODO
-    return NO_THREAD;
+    
+    // check if a thread has been terminated
+    if (terminated_head != NULL) {
+
+        // remove the oldest terminated thread
+        thread finished = dequeue(&terminated_head, &terminated_tail);
+
+        // save its thread ID
+        tid_t id = finished->tid;
+
+        // return its termination status if requested
+        if (status != NULL) {
+            *status = finished->status;
+        }
+
+        // free its allocated stack
+        if (finished->stack != NULL) {
+            munmap(finished->stack, finished->stacksize);
+        }
+
+        // free the thread context (free the heap! (or stack in this case))
+        free(finished);
+
+        return id;
+    }
+
+    // check if any other runnable threads exist
+    if (get_scheduler()->qlen() <= 1) {
+        return NO_THREAD;
+    }
+
+    // now we're in the position where we want to block the calling thread
+
+    // save the currently running thread
+    thread waiting = current_context;
+
+    // remove it from the scheduler
+    get_scheduler()->remove(waiting);
+
+    // add it to the waiting queue
+    enqueue(&waiting_head, &waiting_tail, waiting);
+
+    // select the next runnable thread
+    thread next = get_scheduler()->next();
+
+    // update the currently running thread
+    current_context = next;
+
+    // switch execution to the next thread (the context switch)
+    swap_rfiles(&waiting->state, &next->state);
+
+    // get the thread that terminated while we were waiting
+    thread finished = waiting->exited;
+
+    // now save its ID
+    tid_t id = finished->tid;
+
+    // collect the termination status
+    if (status != NULL) {
+        *status = finished->status;
+    }
+
+    // free its stack 
+    if (finished->stack != NULL) {
+        munmap(finished->stack, finished->stacksize);
+    }
+
+    // free its context (free the heap!)
+    free(finished);
+
+    return id;
 }
 
-/* Return the ID of the calling LWP */
+/* Return the ID of the calling LWP */ // (lowkey the easiest to implement David (besides maybe get scheduler))
 tid_t lwp_gettid(void) {
-    // TODO
-    return NO_THREAD;
+
+    if (current_context == NULL) {
+        return NO_THREAD;
+    }
+
+    return current_context->tid;
 }
 
 /* Find a thread by its ID */
@@ -265,6 +398,6 @@ void lwp_set_scheduler(scheduler sched) {
 
 /* Return the current scheduler */
 scheduler lwp_get_scheduler(void) {
-    // TODO
-    return NULL;
+
+    return get_scheduler();
 }
