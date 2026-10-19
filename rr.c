@@ -1,4 +1,5 @@
 #include "lwp.h"
+#include <stddef.h>
 
 // linked list of runnable threads
 static thread head = NULL;

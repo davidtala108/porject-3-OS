@@ -22,6 +22,8 @@ static thread terminated_tail = NULL;
 static thread waiting_head = NULL;
 static thread waiting_tail = NULL;
 
+// global variable for the first thread in a linked list of threads
+static thread all_threads = NULL;
 
 /* Wrapper for thread functions */
 static void lwp_wrap(lwpfun fun, void *arg) {
@@ -86,6 +88,31 @@ static thread dequeue(thread *head, thread *tail) {
     return removed;
 }
 
+// we will want this case for when the lwp_wait() function frees a thread
+// If we never remove it from the global list, then tid2thread() might try and access global memory
+static void remove_thread(thread removed) {
+
+    thread temp = all_threads;
+    thread prev = NULL;
+
+    while (temp != NULL) {
+
+        if (temp == removed) {
+
+            if (prev == NULL) {
+                all_threads = temp->lib_one;
+            } else {
+                prev->lib_one = temp->lib_one;
+            }
+
+            return;
+        }
+
+        prev = temp;
+        temp = temp->lib_one;
+    }
+}
+
 /* Create a new lightweight process */
 tid_t lwp_create(lwpfun function, void *argument) {
 
@@ -142,8 +169,9 @@ tid_t lwp_create(lwpfun function, void *argument) {
         return NO_THREAD;
     }
 
+
 	// allocate memory for the thread context
-    context *thread_context = malloc(1, sizeof(context));
+    context *thread_context = calloc(1, sizeof(*thread_context));
 
     if (thread_context == NULL) {
         munmap(stack, stack_size);
@@ -157,6 +185,7 @@ tid_t lwp_create(lwpfun function, void *argument) {
         return NO_THREAD;
     }
 
+    thread_context->exited = NULL;
     thread_context->tid = next_tid++;
     thread_context->stack = stack;
     thread_context->stacksize = stack_size;
@@ -181,6 +210,10 @@ tid_t lwp_create(lwpfun function, void *argument) {
     thread_context->state.rbp = (unsigned long)sp;
     thread_context->state.rsp = (unsigned long)sp;
 
+    // put all threads into the global thread list that is used in tid2thread()
+    thread_context->lib_one = all_threads;
+    all_threads = thread_context;
+
 	// put the thread context into the scheduler
     get_scheduler()->admit(thread_context);
 
@@ -195,7 +228,7 @@ void lwp_start(void) {
     }
 
 	// context allocation for current thread
-    context *context = malloc(1, sizeof(context));
+    context *context = calloc(1, sizeof(*context));
 
     if (context == NULL) {
         fprintf(stderr, "Malloc failed\n");
@@ -204,14 +237,19 @@ void lwp_start(void) {
 
 	// assign a thread if
     if (next_tid == NO_THREAD || next_tid == ULONG_MAX) {
-        free(OG_context);
+        free(context);
         return;
     }
 
+    context->exited = NULL;
     context->tid = next_tid++;
     context->stack = NULL;
     context->stacksize = 0;
     context->status = LWP_LIVE;
+
+    // we do this to make sure that we put the thread that's currently in the system into our global list
+    context->lib_one = all_threads;
+    all_threads = context;
 
 	// sets original thread to the current thread
     current_context = context;
@@ -301,6 +339,10 @@ void lwp_exit(int status) {
 
 /* Wait for a terminated LWP */
 tid_t lwp_wait(int *status) {
+
+    if (current_context == NULL) {
+        return NO_THREAD;
+    }
     
     // check if a thread has been terminated
     if (terminated_head != NULL) {
@@ -322,6 +364,7 @@ tid_t lwp_wait(int *status) {
         }
 
         // free the thread context (free the heap! (or stack in this case))
+        remove_thread(finished); // remove from the global lsit of threads too
         free(finished);
 
         return id;
@@ -334,19 +377,14 @@ tid_t lwp_wait(int *status) {
 
     // now we're in the position where we want to block the calling thread
 
-    // save the currently running thread
+    // save the currently running thread and add it to the waiting queue
     thread waiting = current_context;
-
-    // remove it from the scheduler
     get_scheduler()->remove(waiting);
-
-    // add it to the waiting queue
     enqueue(&waiting_head, &waiting_tail, waiting);
 
-    // select the next runnable thread
+    // select the next runnable thread and update the currently running thread
     thread next = get_scheduler()->next();
 
-    // update the currently running thread
     current_context = next;
 
     // switch execution to the next thread (the context switch)
@@ -355,7 +393,6 @@ tid_t lwp_wait(int *status) {
     // get the thread that terminated while we were waiting
     thread finished = waiting->exited;
 
-    // now save its ID
     tid_t id = finished->tid;
 
     // collect the termination status
@@ -369,6 +406,7 @@ tid_t lwp_wait(int *status) {
     }
 
     // free its context (free the heap!)
+    remove_thread(finished); // remove from global lsit too
     free(finished);
 
     return id;
@@ -386,14 +424,51 @@ tid_t lwp_gettid(void) {
 
 /* Find a thread by its ID */
 thread tid2thread(tid_t tid) {
-    // TODO
+
+    thread temp = all_threads;
+
+    while (temp != NULL) {
+        if (temp->tid == tid) {
+            return temp;
+        }
+
+        temp = temp->lib_one;
+    }
+
     return NULL;
 }
 
 /* Install a scheduler */
-void lwp_set_scheduler(scheduler sched) {
-    // TODO
-    (void)sched;
+void lwp_set_scheduler(scheduler schedulerr) {
+
+    scheduler old = get_scheduler();
+
+    if (schedulerr == NULL) {
+        schedulerr = RoundRobin;
+    }
+
+    if (schedulerr == old) {
+        return;
+    }
+
+    if (schedulerr->init != NULL) {
+        schedulerr->init();
+    }
+
+    while (old->qlen() > 0) {
+
+        thread temp = old->next();
+
+        old->remove(temp);
+        schedulerr->admit(temp);
+    }
+
+    if (old->shutdown != NULL) {
+        old->shutdown();
+    }
+
+    current_scheduler = schedulerr;
+    scheduler_initialized = 1;
 }
 
 /* Return the current scheduler */
