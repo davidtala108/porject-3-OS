@@ -155,20 +155,12 @@ tid_t lwp_create(lwpfun function, void *argument) {
         return NO_THREAD;
     }
 
-	// allocation of memory using mmap
-    unsigned long *stack = mmap(
-        NULL,
-        stack_size,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK,
-        -1,
-        0
-    );
+	// allocation of memory for thread's usage using mmap
+    unsigned long *stack = mmap(NULL, stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
 
     if (stack == MAP_FAILED) {
         return NO_THREAD;
     }
-
 
 	// allocate memory for the thread context
     context *thread_context = calloc(1, sizeof(*thread_context));
@@ -185,12 +177,12 @@ tid_t lwp_create(lwpfun function, void *argument) {
         return NO_THREAD;
     }
 
+    // assign thread context variables
     thread_context->exited = NULL;
     thread_context->tid = next_tid++;
     thread_context->stack = stack;
     thread_context->stacksize = stack_size;
     thread_context->status = LWP_LIVE;
-
     thread_context->state.fxsave = FPU_INIT;
 
     // args for lwp_wrap (function, argument)
@@ -200,9 +192,7 @@ tid_t lwp_create(lwpfun function, void *argument) {
     // stack grows downward from high memory
     unsigned long *sp = (unsigned long *)((char *)stack + stack_size);
 
-    // build the initial stack frame for swap_rfiles()
-	// at entry to lwp_wrap(), rsp must be 8 mod 16.
-
+    // build the initial stack frame for swap_rfiles() at entry to lwp_wrap(), rsp must be 8 mod 16.
     *(--sp) = 0;
     *(--sp) = (unsigned long)lwp_wrap;
     *(--sp) = 0;
@@ -227,7 +217,7 @@ void lwp_start(void) {
         return;
     }
 
-	// context allocation for current thread
+	// context allocation for starting thread
     context *context = calloc(1, sizeof(*context));
 
     if (context == NULL) {
@@ -241,6 +231,7 @@ void lwp_start(void) {
         return;
     }
 
+    // context variable assignment
     context->exited = NULL;
     context->tid = next_tid++;
     context->stack = NULL;
@@ -254,7 +245,7 @@ void lwp_start(void) {
 	// sets original thread to the current thread
     current_context = context;
 
-	// put og thread into scheduler
+	// put starting thread into scheduler
     get_scheduler()->admit(context);
 
 	// give control to the scheduler as required
@@ -278,6 +269,7 @@ void lwp_yield(void) {
         exit(0);
     }
 
+    // return without switching context if old happens to be the new
     if (next_lwp == old_lwp) {
         return;
     }
@@ -347,10 +339,8 @@ tid_t lwp_wait(int *status) {
     // check if a thread has been terminated
     if (terminated_head != NULL) {
 
-        // remove the oldest terminated thread
+        // remove the oldest terminated thread and save its thread ID
         thread finished = dequeue(&terminated_head, &terminated_tail);
-
-        // save its thread ID
         tid_t id = finished->tid;
 
         // return its termination status if requested
@@ -363,7 +353,7 @@ tid_t lwp_wait(int *status) {
             munmap(finished->stack, finished->stacksize);
         }
 
-        // free the thread context (free the heap! (or stack in this case))
+        // free the thread context (free the heap!)
         remove_thread(finished); // remove from the global lsit of threads too
         free(finished);
 
@@ -375,7 +365,7 @@ tid_t lwp_wait(int *status) {
         return NO_THREAD;
     }
 
-    // now we're in the position where we want to block the calling thread
+    // now we're in the situation where we want to block the calling thread
 
     // save the currently running thread and add it to the waiting queue
     thread waiting = current_context;
@@ -384,7 +374,6 @@ tid_t lwp_wait(int *status) {
 
     // select the next runnable thread and update the currently running thread
     thread next = get_scheduler()->next();
-
     current_context = next;
 
     // switch execution to the next thread (the context switch)
@@ -447,6 +436,7 @@ void lwp_set_scheduler(scheduler schedulerr) {
         schedulerr = RoundRobin;
     }
 
+    // if new = rr
     if (schedulerr == old) {
         return;
     }
